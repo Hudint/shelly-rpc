@@ -1,0 +1,10 @@
+services:
+  shelly-rpc:
+    # Prebuilt image from the GitHub Container Registry.
+    # To build locally instead: docker compose build (see "build" below).
+    image: ghcr.io/hudint/shelly-rpc:latest
+    # build: .
+    container_name: shelly-rpc
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
