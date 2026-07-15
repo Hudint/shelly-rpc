@@ -15,10 +15,17 @@ issues and optional login credentials never reach the browser.
 
 ## Features
 
-- Live screenshot of the display; clicking the image taps that spot
+- Live screenshot of the display; **click to tap**, **drag to swipe**
+- **Device status & actions**: model/firmware/uptime, ambient light, Wi-Fi,
+  built-in relay toggle, reboot, firmware update check
+- **Display settings**: brightness (auto/level), screen saver, screen lock
+- **Media**: play/pause/next/previous, volume, and ringtones
 - Configurable auto-refresh interval (from 200 ms)
 - Optional device login (Digest auth), shown only when needed
 - Settings are persisted locally in the browser
+
+All device actions go through a generic server-side RPC proxy
+(`/api/shelly/rpc`), so credentials stay on the server.
 
 ---
 

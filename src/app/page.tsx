@@ -1,26 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-
-interface Config {
-  ip: string;
-  username: string;
-  password: string;
-}
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createRpcClient, ShellyConfig } from "@/lib/rpc";
+import { Button, Field, Panel, checkboxClass, inputClass } from "@/components/ui";
+import { DevicePanel } from "@/components/DevicePanel";
+import { DisplayPanel } from "@/components/DisplayPanel";
+import { MediaPanel } from "@/components/MediaPanel";
 
 const STORAGE_KEY = "shelly-wd-remote-config";
 const USE_AUTH_STORAGE_KEY = "shelly-wd-remote-use-auth";
 const REFRESH_MS_STORAGE_KEY = "shelly-wd-remote-refresh-ms";
 const MIN_REFRESH_MS = 200;
 const DEFAULT_REFRESH_MS = 2000;
-const EMPTY_CONFIG: Config = { ip: "", username: "", password: "" };
-
-const inputClass =
-  "rounded-lg border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none transition-colors focus:border-blue-600 focus:ring-1 focus:ring-blue-600 disabled:opacity-50";
-const checkboxClass = "h-4 w-4 rounded border-neutral-600 bg-neutral-900 accent-blue-600";
+// Below this drag distance (in device pixels) a gesture counts as a tap.
+const SWIPE_THRESHOLD_PX = 25;
+const EMPTY_CONFIG: ShellyConfig = { ip: "", username: "", password: "" };
 
 export default function Home() {
-  const [config, setConfig] = useState<Config>(EMPTY_CONFIG);
+  const [config, setConfig] = useState<ShellyConfig>(EMPTY_CONFIG);
   const [useAuth, setUseAuth] = useState(false);
   const [imgUrl, setImgUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -31,6 +28,21 @@ export default function Home() {
 
   const imgRef = useRef<HTMLImageElement>(null);
   const objectUrlRef = useRef<string | null>(null);
+  const gestureStart = useRef<{ x: number; y: number; relX: number; relY: number } | null>(null);
+
+  const effectiveConfig = useMemo<ShellyConfig>(
+    () => ({
+      ip: config.ip,
+      username: useAuth ? config.username : "",
+      password: useAuth ? config.password : "",
+    }),
+    [config, useAuth]
+  );
+
+  const rpc = useMemo(
+    () => (effectiveConfig.ip ? createRpcClient(effectiveConfig) : null),
+    [effectiveConfig]
+  );
 
   useEffect(() => {
     try {
@@ -61,24 +73,15 @@ export default function Home() {
     localStorage.setItem(REFRESH_MS_STORAGE_KEY, String(refreshMs));
   }, [refreshMs]);
 
-  const buildRequestConfig = useCallback(
-    (): Config => ({
-      ip: config.ip,
-      username: useAuth ? config.username : "",
-      password: useAuth ? config.password : "",
-    }),
-    [config, useAuth]
-  );
-
   const refreshScreenshot = useCallback(async () => {
-    if (!config.ip) return;
+    if (!effectiveConfig.ip) return;
     setLoading(true);
     setError(null);
     try {
       const res = await fetch("/api/shelly/screenshot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildRequestConfig()),
+        body: JSON.stringify(effectiveConfig),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -94,13 +97,13 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [config.ip, buildRequestConfig]);
+  }, [effectiveConfig]);
 
   useEffect(() => {
-    if (!autoRefresh || !config.ip) return;
+    if (!autoRefresh || !effectiveConfig.ip) return;
     const id = setInterval(refreshScreenshot, Math.max(MIN_REFRESH_MS, refreshMs));
     return () => clearInterval(id);
-  }, [autoRefresh, config.ip, refreshMs, refreshScreenshot]);
+  }, [autoRefresh, effectiveConfig.ip, refreshMs, refreshScreenshot]);
 
   useEffect(() => {
     return () => {
@@ -108,37 +111,54 @@ export default function Home() {
     };
   }, []);
 
-  async function handleImageClick(e: React.MouseEvent<HTMLImageElement>) {
+  /** Maps a pointer event to device-pixel and relative (%) coordinates. */
+  function pointToCoords(e: React.PointerEvent<HTMLImageElement>) {
     const img = imgRef.current;
-    if (!img || !img.naturalWidth || !img.naturalHeight) return;
-
+    if (!img || !img.naturalWidth || !img.naturalHeight) return null;
     const rect = img.getBoundingClientRect();
     const relX = (e.clientX - rect.left) / rect.width;
     const relY = (e.clientY - rect.top) / rect.height;
-    const x = Math.round(relX * img.naturalWidth);
-    const y = Math.round(relY * img.naturalHeight);
+    return {
+      x: Math.round(relX * img.naturalWidth),
+      y: Math.round(relY * img.naturalHeight),
+      relX: relX * 100,
+      relY: relY * 100,
+    };
+  }
 
-    setMarker({ x: relX * 100, y: relY * 100 });
+  function handlePointerDown(e: React.PointerEvent<HTMLImageElement>) {
+    gestureStart.current = pointToCoords(e);
+  }
+
+  async function handlePointerUp(e: React.PointerEvent<HTMLImageElement>) {
+    const start = gestureStart.current;
+    const end = pointToCoords(e);
+    gestureStart.current = null;
+    if (!start || !end || !rpc) return;
+
+    const dist = Math.hypot(end.x - start.x, end.y - start.y);
+    setMarker({ x: end.relX, y: end.relY });
     setError(null);
     try {
-      const res = await fetch("/api/shelly/tap", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...buildRequestConfig(), x, y }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? `HTTP ${res.status}`);
+      if (dist < SWIPE_THRESHOLD_PX) {
+        await rpc.call("Ui.Tap", { x: start.x, y: start.y });
+      } else {
+        await rpc.call("Ui.Swipe", {
+          x_start: start.x,
+          y_start: start.y,
+          x_end: end.x,
+          y_end: end.y,
+        });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Tap failed");
+      setError(err instanceof Error ? err.message : "Gesture failed");
       return;
     }
     setTimeout(refreshScreenshot, 350);
   }
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col items-center gap-8 p-6 sm:p-10">
+    <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col items-center gap-6 p-6 sm:p-10">
       <header className="text-center space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Shelly Wall Display Remote</h1>
         <p className="text-sm text-neutral-500">Remote control via the local RPC interface</p>
@@ -153,23 +173,20 @@ export default function Home() {
           }}
         >
           <div className="flex flex-col sm:flex-row gap-3 sm:items-end">
-            <label className="flex-1 flex flex-col gap-1.5 text-sm text-neutral-400">
-              Device IP
-              <input
-                className={inputClass}
-                placeholder="192.168.1.50"
-                value={config.ip}
-                onChange={(e) => setConfig((c) => ({ ...c, ip: e.target.value }))}
-                required
-              />
-            </label>
-            <button
-              type="submit"
-              className="rounded-lg bg-blue-600 px-5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600"
-              disabled={loading || !config.ip}
-            >
+            <div className="flex-1">
+              <Field label="Device IP">
+                <input
+                  className={inputClass}
+                  placeholder="192.168.1.50"
+                  value={config.ip}
+                  onChange={(e) => setConfig((c) => ({ ...c, ip: e.target.value }))}
+                  required
+                />
+              </Field>
+            </div>
+            <Button type="submit" variant="primary" disabled={loading || !config.ip} className="px-5 py-2">
               {loading ? "Loading…" : "Refresh"}
-            </button>
+            </Button>
           </div>
 
           <div className="space-y-3 border-t border-neutral-800 pt-4">
@@ -184,24 +201,22 @@ export default function Home() {
             </label>
             {useAuth && (
               <div className="grid grid-cols-1 gap-3 pl-6 sm:grid-cols-2">
-                <label className="flex flex-col gap-1.5 text-sm text-neutral-400">
-                  Username
+                <Field label="Username">
                   <input
                     className={inputClass}
                     placeholder="admin"
                     value={config.username}
                     onChange={(e) => setConfig((c) => ({ ...c, username: e.target.value }))}
                   />
-                </label>
-                <label className="flex flex-col gap-1.5 text-sm text-neutral-400">
-                  Password
+                </Field>
+                <Field label="Password">
                   <input
                     type="password"
                     className={inputClass}
                     value={config.password}
                     onChange={(e) => setConfig((c) => ({ ...c, password: e.target.value }))}
                   />
-                </label>
+                </Field>
               </div>
             )}
           </div>
@@ -252,8 +267,9 @@ export default function Home() {
                 ref={imgRef}
                 src={imgUrl}
                 alt="Wall Display Screenshot"
-                className="block w-full cursor-crosshair select-none"
-                onClick={handleImageClick}
+                className="block w-full touch-none cursor-crosshair select-none"
+                onPointerDown={handlePointerDown}
+                onPointerUp={handlePointerUp}
                 draggable={false}
               />
             ) : (
@@ -271,10 +287,20 @@ export default function Home() {
         </div>
 
         <p className="mt-3 text-center text-xs text-neutral-500">
-          Click the image to tap that spot on the Wall Display. The screenshot
-          reloads automatically after each tap.
+          Click to tap that spot, or drag to swipe. The screenshot reloads
+          automatically after each gesture.
         </p>
       </section>
+
+      <Panel title="Device status &amp; actions">
+        <DevicePanel rpc={rpc} />
+      </Panel>
+      <Panel title="Display settings">
+        <DisplayPanel rpc={rpc} />
+      </Panel>
+      <Panel title="Media">
+        <MediaPanel rpc={rpc} />
+      </Panel>
     </div>
   );
 }
